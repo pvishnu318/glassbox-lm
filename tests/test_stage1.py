@@ -262,3 +262,18 @@ def test_t7_storage_roundtrip_and_no_overwrite(tmp_path: Path) -> None:
     assert loaded_records[0]["prompt_id"] == "p1"
     assert loaded_records[1]["prompt_id"] == "p2"
     assert loaded_meta["test_run"] is True
+
+
+def test_scripts_importability() -> None:
+    """Verify that all scripts can be imported without NameErrors or missing type annotations."""
+    import importlib.util
+
+    script_files = ["scripts/00_env_check.py", "scripts/01_extract_pilot.py"]
+    for script_rel in script_files:
+        script_path = PROJECT_ROOT / script_rel
+        spec = importlib.util.spec_from_file_location(script_path.stem, script_path)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        # Executing module verifies all top-level statements, type hints, and imports
+        spec.loader.exec_module(mod)
+
