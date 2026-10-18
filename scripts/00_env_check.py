@@ -9,7 +9,6 @@ NOTE: This script must ONLY be executed in a GPU-enabled environment (e.g. Kaggl
 Do not run this script on a local CPU-only development machine.
 """
 
-import os
 from pathlib import Path
 import sys
 import time

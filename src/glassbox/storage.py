@@ -9,15 +9,11 @@ Strict immutability:
 Overwriting existing run folders is prohibited to prevent accidental data corruption.
 """
 
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 import subprocess
-import sys
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
-import torch
-import transformers
 
 
 def get_git_commit_hash() -> Optional[str]:

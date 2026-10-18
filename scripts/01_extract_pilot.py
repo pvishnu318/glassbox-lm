@@ -13,9 +13,10 @@ import math
 from pathlib import Path
 import sys
 import time
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 import numpy as np
 import torch
+import transformers
 
 # Ensure src/ is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +27,7 @@ if str(SRC_PATH) not in sys.path:
 from glassbox.config import Config, load_config
 from glassbox.data import QuestionExample, load_and_validate_questions
 from glassbox.features import ExtractedFeatures, extract_features
-from glassbox.generation import GenerationResult, generate_answer
+from glassbox.generation import generate_answer
 from glassbox.model_loader import get_hf_token, load_model_and_tokenizer
 from glassbox.prompting import format_prompt, tokenize_prompt
 from glassbox.seed import set_seed
@@ -62,8 +63,8 @@ def run_sanity_checks(
     tokenizer: Any,
     saved_features: Dict[str, np.ndarray],
     extracted_features_list: List[ExtractedFeatures],
-    first_example_prompt_ids: torch.Tensor,
-    first_example_answer_ids: torch.Tensor,
+    first_example_prompt_ids: Optional[torch.Tensor],
+    first_example_answer_ids: Optional[torch.Tensor],
     layers: Sequence[int],
     total_time: float,
     num_examples: int,
@@ -98,7 +99,12 @@ def run_sanity_checks(
         print("  [SKIP] S2: No non-empty answers to evaluate greedy consistency.")
 
     # --- S3: Determinism check (re-extract first example) ---
-    if first_example_answer_ids.shape[1] > 0:
+    if (
+        first_example_prompt_ids is not None
+        and first_example_answer_ids is not None
+        and first_example_answer_ids.shape[1] > 0
+        and extracted_features_list
+    ):
         f_re = extract_features(model, first_example_prompt_ids, first_example_answer_ids, layers=layers)
         f_orig = extracted_features_list[0]
 
@@ -112,12 +118,13 @@ def run_sanity_checks(
         else:
             print(f"  [FAIL] S3: Non-deterministic extraction! Max diff = {max_abs_diff:.6e}")
     else:
-        print("  [SKIP] S3: First example had an empty answer.")
+        print("  [SKIP] S3: First example had an empty answer or no features extracted.")
 
     # --- S4: Long-prompt stress test (~500 tokens) ---
     neutral_sentence = "In deep language models, activation patterns indicate latent certainty and representation structure. "
     stress_text = neutral_sentence * 35  # ~500 tokens
-    stress_tokens = tokenizer(stress_text, return_tensors="pt").input_ids.to(model.device)
+    device = next(model.parameters()).device
+    stress_tokens = tokenize_prompt(stress_text, tokenizer, device=device)
     actual_stress_len = stress_tokens.shape[1]
 
     with torch.no_grad():
@@ -139,50 +146,39 @@ def run_sanity_checks(
         peak_memory_mb = torch.cuda.max_memory_allocated(0) / (1024**2)
         print(f"  [PASS] S5: Average time per example: {avg_seconds:.2f}s | Peak GPU memory: {peak_memory_mb:.2f} MB")
     else:
-        print(f"  [PASS] S5: Average time per example: {avg_seconds:.2f}s | (CPU execution, no GPU memory recorded)")
+        print(f"  [PASS] S5: Average time per example: {avg_seconds:.2f}s | (Skipping peak GPU memory on CPU)")
 
     print("=" * 60)
 
 
-def main() -> None:
-    """Execute pilot feature extraction and validation pipeline."""
-    args = parse_args()
+def run_pilot(
+    model: torch.nn.Module,
+    tokenizer: Any,
+    config: Config,
+    questions: Sequence[QuestionExample],
+    run_name: str,
+    output_root: Union[str, Path] = "results",
+) -> Path:
+    """Execute the pilot evaluation pipeline for a list of questions.
 
-    # 1. Load config and set random seed
-    cfg: Config = load_config(args.config)
-    set_seed(cfg.seed)
+    Args:
+        model: Causal language model.
+        tokenizer: Tokenizer corresponding to model.
+        config: Project configuration dataclass.
+        questions: Validated question records.
+        run_name: Run directory name.
+        output_root: Base results directory.
 
-    # 2. Check GPU environment and compute capability
-    if torch.cuda.is_available():
-        major, _ = torch.cuda.get_device_capability(0)
-        gpu_name = torch.cuda.get_device_name(0)
-        device = "cuda"
-    else:
-        print("Warning: Running on CPU. Gemma-2-2B inference is intended for GPU.")
-        major = 0
-        gpu_name = "CPU"
-        device = "cpu"
+    Returns:
+        Path to the saved run folder.
+    """
+    device = next(model.parameters()).device
+    is_cuda = next(model.parameters()).is_cuda
+    gpu_name = torch.cuda.get_device_name(0) if is_cuda else "CPU"
 
-    hf_token = get_hf_token()
-
-    # 3. Load model and tokenizer
-    print(f"Loading model '{cfg.model.name}' on {device}...")
-    tokenizer, model = load_model_and_tokenizer(
-        model_name=cfg.model.name,
-        hf_token=hf_token,
-        compute_major=major,
-        force_float32=cfg.model.force_float32,
-        device_map=device,
-    )
-
-    # 4. Print theoretical maximum entropy for reference
     vocab_size = getattr(model.config, "vocab_size", len(tokenizer))
     max_theoretical_entropy = math.log(vocab_size)
     print(f"Model vocab size: {vocab_size} | Theoretical maximum entropy: {max_theoretical_entropy:.4f} nats\n")
-
-    # 5. Load and validate input questions
-    questions = load_and_validate_questions(args.input)
-    print(f"Loaded {len(questions)} validated questions from {args.input}\n")
 
     prompt_ids_list: List[str] = []
     last_prompt_list: List[np.ndarray] = []
@@ -191,20 +187,20 @@ def main() -> None:
     extracted_features_list: List[ExtractedFeatures] = []
     records: List[Dict[str, Any]] = []
 
-    first_example_prompt_ids = None
-    first_example_answer_ids = None
+    first_example_prompt_ids: Optional[torch.Tensor] = None
+    first_example_answer_ids: Optional[torch.Tensor] = None
 
     start_time = time.perf_counter()
 
     for idx, q in enumerate(questions):
-        prompt_text = format_prompt(q.question, cfg.prompt.few_shot_examples)
+        prompt_text = format_prompt(q.question, config.prompt.few_shot_examples)
         prompt_ids = tokenize_prompt(prompt_text, tokenizer, device=device)
 
         gen_res = generate_answer(
             model=model,
             tokenizer=tokenizer,
             prompt_ids=prompt_ids,
-            max_new_tokens=cfg.generation.max_new_tokens,
+            max_new_tokens=config.generation.max_new_tokens,
         )
 
         if idx == 0:
@@ -228,7 +224,7 @@ def main() -> None:
                 model=model,
                 prompt_ids=prompt_ids,
                 answer_ids=gen_res.answer_ids,
-                layers=cfg.features.layers,
+                layers=config.features.layers,
             )
             extracted_features_list.append(feats)
 
@@ -277,14 +273,14 @@ def main() -> None:
 
     total_time = time.perf_counter() - start_time
 
-    # 6. Save results
-    num_layers = len(cfg.features.layers)
+    # Save results
+    num_layers = len(config.features.layers)
     hidden_size = getattr(model.config, "hidden_size", 2304)
 
     if last_prompt_list:
         saved_features = {
             "prompt_ids": np.array(prompt_ids_list, dtype=str),
-            "layers": np.array(list(cfg.features.layers), dtype=int),
+            "layers": np.array(list(config.features.layers), dtype=int),
             "last_prompt": np.stack(last_prompt_list, axis=0).astype(np.float32),
             "last_generated": np.stack(last_gen_list, axis=0).astype(np.float32),
             "mean_generated": np.stack(mean_gen_list, axis=0).astype(np.float32),
@@ -292,7 +288,7 @@ def main() -> None:
     else:
         saved_features = {
             "prompt_ids": np.array([], dtype=str),
-            "layers": np.array(list(cfg.features.layers), dtype=int),
+            "layers": np.array(list(config.features.layers), dtype=int),
             "last_prompt": np.empty((0, num_layers, hidden_size), dtype=np.float32),
             "last_generated": np.empty((0, num_layers, hidden_size), dtype=np.float32),
             "mean_generated": np.empty((0, num_layers, hidden_size), dtype=np.float32),
@@ -303,20 +299,20 @@ def main() -> None:
         "python_version": sys.version.split()[0],
         "torch_version": torch.__version__,
         "transformers_version": transformers.__version__,
-        "device": device,
+        "device": str(device),
         "gpu_name": gpu_name,
         "dtype": str(next(model.parameters()).dtype),
-        "seed": cfg.seed,
-        "layers": list(cfg.features.layers),
+        "seed": config.seed,
+        "layers": list(config.features.layers),
         "git_commit": get_git_commit_hash(),
         "config": {
-            "model": {"name": cfg.model.name, "force_float32": cfg.model.force_float32},
-            "generation": {"max_new_tokens": cfg.generation.max_new_tokens},
-            "features": {"layers": list(cfg.features.layers)},
+            "model": {"name": config.model.name, "force_float32": config.model.force_float32},
+            "generation": {"max_new_tokens": config.generation.max_new_tokens},
+            "features": {"layers": list(config.features.layers)},
         },
     }
 
-    run_dir = Path(cfg.paths.results_dir) / args.run_name
+    run_dir = Path(output_root) / run_name
     saved_path = save_run_results(
         run_dir=run_dir,
         features=saved_features,
@@ -325,19 +321,64 @@ def main() -> None:
     )
     print(f"\nSaved results to {saved_path.resolve()}")
 
-    # 7. Execute sanity checks S1 - S5
-    if first_example_prompt_ids is not None and first_example_answer_ids is not None:
-        run_sanity_checks(
-            model=model,
-            tokenizer=tokenizer,
-            saved_features=saved_features,
-            extracted_features_list=extracted_features_list,
-            first_example_prompt_ids=first_example_prompt_ids,
-            first_example_answer_ids=first_example_answer_ids,
-            layers=cfg.features.layers,
-            total_time=total_time,
-            num_examples=len(questions),
-        )
+    # Execute sanity checks S1 - S5
+    run_sanity_checks(
+        model=model,
+        tokenizer=tokenizer,
+        saved_features=saved_features,
+        extracted_features_list=extracted_features_list,
+        first_example_prompt_ids=first_example_prompt_ids,
+        first_example_answer_ids=first_example_answer_ids,
+        layers=config.features.layers,
+        total_time=total_time,
+        num_examples=len(questions),
+    )
+
+    return saved_path
+
+
+def main() -> None:
+    """Execute pilot feature extraction and validation pipeline."""
+    args = parse_args()
+
+    # 1. Load config and set random seed
+    cfg: Config = load_config(args.config)
+    set_seed(cfg.seed)
+
+    # 2. Check GPU environment and compute capability
+    if torch.cuda.is_available():
+        major, _ = torch.cuda.get_device_capability(0)
+        device = "cuda"
+    else:
+        print("Warning: Running on CPU. Gemma-2-2B inference is intended for GPU.")
+        major = 0
+        device = "cpu"
+
+    hf_token = get_hf_token()
+
+    # 3. Load model and tokenizer
+    print(f"Loading model '{cfg.model.name}' on {device}...")
+    tokenizer, model = load_model_and_tokenizer(
+        model_name=cfg.model.name,
+        hf_token=hf_token,
+        compute_major=major,
+        force_float32=cfg.model.force_float32,
+        device_map=device,
+    )
+
+    # 4. Load and validate input questions
+    questions = load_and_validate_questions(args.input)
+    print(f"Loaded {len(questions)} validated questions from {args.input}\n")
+
+    # 5. Execute pilot pipeline
+    run_pilot(
+        model=model,
+        tokenizer=tokenizer,
+        config=cfg,
+        questions=questions,
+        run_name=args.run_name,
+        output_root=cfg.paths.results_dir,
+    )
 
 
 if __name__ == "__main__":
