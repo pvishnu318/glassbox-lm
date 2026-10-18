@@ -10,12 +10,17 @@ Do not run this script on a local CPU-only development machine.
 """
 
 import os
+from pathlib import Path
 import sys
 import time
 from typing import Tuple
 import torch
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Ensure src is on sys.path so glassbox modules can be imported
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from glassbox.model_loader import get_hf_token, load_model_and_tokenizer, select_dtype
 
 
 def step_a() -> bool:
@@ -70,19 +75,10 @@ def step_c() -> str:
     print("=" * 60)
     print("STEP C: Verifying Hugging Face authentication token...")
 
-    hf_token = os.environ.get("HF_TOKEN", "").strip()
-    if not hf_token:
-        print(
-            "[FAIL] Step C: HF_TOKEN environment variable is missing or empty.\n"
-            "  The model 'google/gemma-2-2b' is gated and requires acceptance of terms\n"
-            "  on Hugging Face and an authenticated user token.\n"
-            "  How to set it:\n"
-            "    - On Kaggle: Go to Add-ons -> Secrets -> Add 'HF_TOKEN' with your access token.\n"
-            "    - In Bash/Zsh: export HF_TOKEN=\"hf_...\"\n"
-            "    - In PowerShell: $env:HF_TOKEN=\"hf_...\"\n"
-            "  SECURITY: Never commit or hard-code your HF_TOKEN into source files.\n"
-            "  Stopping execution now."
-        )
+    try:
+        hf_token = get_hf_token()
+    except ValueError as exc:
+        print(f"[FAIL] Step C: {exc}")
         sys.exit(1)
 
     print("  HF_TOKEN found in environment (value masked for security).")
@@ -91,26 +87,19 @@ def step_c() -> str:
 
 
 def step_d(hf_token: str, compute_major: int) -> Tuple[AutoTokenizer, AutoModelForCausalLM]:
-    """Step d: Load tokenizer and model using bfloat16 or float16 depending on capability.
-
-    Why dtype depends on compute capability:
-    - bfloat16 requires native hardware support starting from NVIDIA Ampere (compute capability >= 8.0).
-    - Older architectures like Turing (T4, 7.5) or Pascal (P100, 6.0) lack bfloat16 tensor core acceleration
-      and must use float16 to prevent slow software emulation or runtime failures.
-    """
+    """Step d: Load tokenizer and model using bfloat16 or float16 depending on capability."""
     print("=" * 60)
     print("STEP D: Loading model and tokenizer 'google/gemma-2-2b'...")
 
     model_name = "google/gemma-2-2b"
-    selected_dtype = torch.bfloat16 if compute_major >= 8 else torch.float16
+    selected_dtype = select_dtype(compute_major=compute_major)
     print(f"  Selected dtype: {selected_dtype} (based on compute capability major {compute_major})")
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            token=hf_token,
-            torch_dtype=selected_dtype,
+        tokenizer, model = load_model_and_tokenizer(
+            model_name=model_name,
+            hf_token=hf_token,
+            compute_major=compute_major,
             device_map="cuda",
         )
     except Exception as exc:
@@ -127,7 +116,15 @@ def step_e(tokenizer: AutoTokenizer, model: AutoModelForCausalLM) -> Tuple[torch
     print("=" * 60)
     print("STEP E: Executing forward pass with output_hidden_states=True...")
 
-    test_sentence = "The internal activation of a language model reveals its belief."
+    # Note: Short sentences (~10-15 tokens) rarely trigger float16 numerical instability (underflow/overflow).
+    # Float16 issues typically emerge on longer contexts. While this quick check tests a multi-sentence prompt,
+    # Stage 1 will systematically evaluate full-length dataset contexts.
+    test_sentence = (
+        "The internal activations of a deep language model can reveal whether generated "
+        "statements are grounded in factual knowledge or represent hallucinations. "
+        "In this research, GlassBox-LM analyzes hidden states across intermediate transformer layers "
+        "to evaluate confidence, consistency, and truthfulness across diverse question answering benchmarks."
+    )
     inputs = tokenizer(test_sentence, return_tensors="pt").to("cuda")
 
     # inference_mode disables autograd graph building and view tracking, saving memory and compute
@@ -195,6 +192,7 @@ def step_g(hidden_states: Tuple[torch.Tensor, ...], num_hidden_layers: int) -> b
 
     print(f"  Verified {actual_tensor_count} hidden-state tensors match num_hidden_layers + 1.")
     print("  Verified no NaN or Inf values are present across all activation tensors.")
+    print("  Note: Smoke test verified on multi-sentence text. Stage 1 will test longer prompts to monitor float16 stability.")
     print("[PASS] Step G: Hidden-state integrity confirmed.")
     return True
 

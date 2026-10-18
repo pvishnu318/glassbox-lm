@@ -1,6 +1,7 @@
 # Default configuration for GlassBox-LM
 model:
   name: "google/gemma-2-2b"
+  force_float32: false
 
 seed: 42
 
@@ -9,3 +10,18 @@ paths:
   results_dir: "results"
   logs_dir: "logs"
   configs_dir: "configs"
+
+prompt:
+  few_shot_examples:
+    - question: "What is the capital of France?"
+      answer: "Paris."
+    - question: "What is the boiling point of water in Celsius?"
+      answer: "100 degrees Celsius."
+    - question: "How many continents are there on Earth?"
+      answer: "Seven continents."
+
+generation:
+  max_new_tokens: 24
+
+features:
+  layers: [6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
