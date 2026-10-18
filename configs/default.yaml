@@ -1,0 +1,11 @@
+# Default configuration for GlassBox-LM
+model:
+  name: "google/gemma-2-2b"
+
+seed: 42
+
+paths:
+  data_dir: "data"
+  results_dir: "results"
+  logs_dir: "logs"
+  configs_dir: "configs"

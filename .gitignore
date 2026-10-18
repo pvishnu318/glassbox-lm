@@ -1,0 +1,30 @@
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Environments and secrets
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Data and experiment outputs
+data/
+results/
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
