@@ -1,11 +1,5 @@
-# Experiment Log
-
-| Date | Tried | Expected | Happened | Changed |
-| --- | --- | --- | --- | --- |
-| 2026-10-18 | Initial project setup (Stage 0 scaffolding) | Establish reproducible config, seed utility, tests, and env check script | All local files created and unit tests passed | Created repository structure |
-| 2026-10-18 | Rename `torch_dtype` to `dtype` and expand sanity check prompt in `scripts/00_env_check.py` | Eliminate deprecation warning in transformers; document float16 stability on longer texts for Stage 1 | Script updated, py_compile and pytest passed cleanly | Renamed parameter to `dtype`, expanded `test_sentence` in `00_env_check.py` |
-| 2026-10-18 | Stage 1 implementation: generation, feature extraction, storage, and pilot pipeline | Modular architecture for answer generation, teacher-forced feature extraction, confidence metrics, and storage | All 11 unit tests (T1-T7 and smoke tests) passed on CPU with tiny Gemma2 model | Created model_loader, prompting, generation, features, data, storage, 01_extract_pilot, test_stage1 |
-| 2026-10-18 | Fix undefined `transformers` in `01_extract_pilot.py` and integrate static checker + end-to-end test | Detect undefined names inside function bodies prior to Kaggle; test full pilot pipeline on CPU | Pyflakes cleanly passed, 14 pytest unit and end-to-end integration tests passed | Added import transformers, refactored run_pilot, created test_static_checks.py and test_pilot_end_to_end.py |
-
+| Date | Stage / Run | What I Did | Predictions vs. Outcome | Bugs / Failures Hit | What I Learned |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 2026-10-19 | Stage 0 (`00_env_check.py` re-verification on Kaggle T4) | Re-ran `scripts/00_env_check.py` on a fresh Kaggle session (Python 3.13.15, PyTorch 2.11.0+cu128, Transformers 5.20.1, 2x Tesla T4 14.56 GB, compute capability 7.5). | Expected all Steps A–H to pass with `torch.float16`, 27 hidden states, hidden size 2304, and zero NaN/Inf. Outcome matched: `num_hidden_layers=26`, `hidden_size=2304`, 27 tensors returned with sample shape `(1, 53, 2304)` (53 tokens in the multi-sentence smoke prompt), 0 NaN/Inf, peak GPU memory `5058.27 MB` (`4.94 GB`), elapsed time `60.13 s`. | Kaggle Secrets are not environment variables by default, so I used the `UserSecretsClient().get_secret("HF_TOKEN")` cell before running the script. | Confirmed that `hidden_states` returns `num_hidden_layers + 1` (27) tensors because index 0 is the embedding layer output, and verified that `float16` on T4 runs cleanly without NaNs on the 53-token smoke prompt. |
 
 
